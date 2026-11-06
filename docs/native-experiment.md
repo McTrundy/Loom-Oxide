@@ -36,17 +36,42 @@ Preserve existing licenses and notices when translating existing algorithms.
    Identify expensive leaf computations, their inputs, state owners and callers.
 2. Capture a repeatable baseline on a pinned artifact, workload and machine.
    Separate profiling runs from acceptance measurements.
-3. Prefer one self-contained computation over moving an entire subsystem. Batched
-   noise or density calculations are candidates to investigate, not a selected
-   first implementation. Establish their actual cost before choosing them.
+3. Begin with batched noise evaluation. Profile the selected methods in fresh
+   generation before implementing a runtime replacement; no speedup is assumed.
 4. Compare an improved Java implementation where appropriate. Native code must
    earn its boundary and maintenance cost.
 
+### First experiment: noise volumes
+
+The selected starting kernel is `PerlinNoise.addToVolume`, called through
+`NoiseStack.addToVolume` and `NoiseFunction.Sampler.sampleVolume`. The current
+Minecraft line already evaluates volumes and reuses intermediate gradient work.
+Preserve those optimizations when comparing implementations.
+
+Start with one Perlin layer to establish exact arithmetic and buffer semantics.
+Then evaluate a whole noise stack per native call to amortize transitions and
+copies across its layers. Keep noise initialization and random-number
+consumption in Java; native evaluation receives the initialized permutation,
+offsets, scales and ordered layers. Measure state preparation and its lifetime.
+
+The reference uses double coordinates and float samples and accumulation.
+Preserve coordinate wrapping, floor behavior, casts and arithmetic order. Test
+negative and large coordinates, wrapping boundaries, existing output contents,
+non-unit amplitudes, volume shapes and repeated/concurrent evaluations.
+
+After kernel parity and binding comparisons, validate fresh chunk generation
+with the Java and native paths. Report the native fraction of generation work,
+total generation throughput and gameplay latency while generating. Extend toward
+density evaluation only when remaining profiles justify it. Entity AI, collision
+and whole-chunk mutation remain later targets because of their broader mutable
+state and event contracts.
+
 ## Java and native code
 
-Evaluate Java 25's Foreign Function & Memory API with a small, versioned C ABI
-exported by a Rust `cdylib`. JFFI and JNI remain alternatives if a concrete need
-justifies them. Choose the binding from measured total cost and compatibility.
+Compare JFFI and Java 25's Foreign Function & Memory API against the same Rust
+`cdylib`, using a small, versioned C ABI and identical kernels, inputs and batching.
+Keep Java as the reference and performance baseline. Include JNI if a concrete
+need justifies it. Choose the binding from measured total cost and compatibility.
 
 Batch substantial computation per call. Include input preparation, copies,
 native transitions, output conversion and allocation in measurements. Avoid a
