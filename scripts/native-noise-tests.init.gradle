@@ -11,5 +11,16 @@ gradle.projectsEvaluated {
         systemProperty 'loom.oxide.nativeLibrary', oxideLibrary
         inputs.file(oxideLibrary).withPropertyName('oxideNativeLibrary').withPathSensitivity(PathSensitivity.NONE)
         jvmArgs '--enable-native-access=ALL-UNNAMED'
+        def parityReport = reports.junitXml.outputLocation.file('TEST-net.minecraft.world.level.levelgen.synth.OxideNoiseTestSuite.xml').get().asFile
+        def backendReport = project.layout.buildDirectory.file("test-results/native-noise/${oxideBackend}.xml").get().asFile
+        doLast {
+            def report = new groovy.xml.XmlSlurper().parse(parityReport)
+            if (report.@tests.text() != '1' || report.@skipped.text() != '0' ||
+                report.@failures.text() != '0' || report.@errors.text() != '0') {
+                throw new GradleException("Native parity suite did not execute successfully for ${oxideBackend}")
+            }
+            backendReport.parentFile.mkdirs()
+            java.nio.file.Files.copy(parityReport.toPath(), backendReport.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }
