@@ -1,4 +1,19 @@
-# Loom
+# Ferrum
+
+Ferrum is an experimental fork of [Loom](https://github.com/AnxeloK/Loom)
+for studying expensive Minecraft computations and evaluating compatible native
+implementations, including Rust. Compatibility is a requirement; performance
+improvements must be measured. No native implementation is included yet.
+
+See the [experiment plan](docs/native-experiment.md) for scope, validation and
+the proposed Java/native boundary. Development is led by McTrundy, with AnxeloK
+credited as co-author on development commits. Existing contributor attribution
+and licensing are preserved.
+
+The instructions below describe the inherited Loom runtime. The download links
+refer to upstream Loom releases.
+
+## Upstream Loom
 
 Loom is a multithreaded Minecraft server based on [Paper](https://papermc.io).
 
