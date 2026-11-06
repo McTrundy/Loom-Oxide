@@ -3,7 +3,8 @@
 Loom Oxide is an experimental fork of [Loom](https://github.com/AnxeloK/Loom)
 for studying expensive Minecraft computations and evaluating compatible native
 implementations, including Rust. Compatibility is a requirement; performance
-improvements must be measured. No native implementation is included yet.
+improvements must be measured. The first [native noise prototype](native/noise/README.md)
+provides optional FFM and JFFI bindings; the runtime defaults to Java.
 
 See the [experiment plan](docs/native-experiment.md) for scope, validation and
 the proposed Java/native boundary. Development is led by McTrundy, with AnxeloK

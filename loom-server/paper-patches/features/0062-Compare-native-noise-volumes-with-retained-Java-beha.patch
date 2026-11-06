@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: McTrundy <58271175+McTrundy@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 20:34:35 +0000
+Subject: [PATCH] Compare native noise volumes with retained Java behavior
+
+Co-authored-by: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+
+diff --git a/src/test/java/net/minecraft/world/level/levelgen/synth/OxideNoiseTestSuite.java b/src/test/java/net/minecraft/world/level/levelgen/synth/OxideNoiseTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d69edca1b33b8e9bff7c26084a4e09c7fbdb3e4
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/levelgen/synth/OxideNoiseTestSuite.java
+@@ -0,0 +1,136 @@
++package net.minecraft.world.level.levelgen.synth;
++
++import java.util.Objects;
++import java.util.SplittableRandom;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import net.minecraft.util.RandomSource;
++import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
++import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
++
++@org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "loom.oxide.noiseBackend", matches = "ffm|jffi")
++public final class OxideNoiseTestSuite {
++    private static long values;
++    private static int cases;
++    private static final DensityVolume[] VOLUMES = {
++        new DensityVolume(1, 1, 1, 0, 0, 0),
++        new DensityVolume(2, 3, 4, -17, -64, 33),
++        new DensityVolume(5, 49, 5, -64, -64, 128, 4, 8, 4),
++        new DensityVolume(1, 384, 1, 160000, -64, -160000),
++        new DensityVolume(3, 5, 2, 16777214, -64, -16777218, 3, 2, 5),
++        new DensityVolume(3, 3, 2, Integer.MAX_VALUE - 2, Integer.MIN_VALUE, 7, 3, 17, 2),
++    };
++
++    @org.junit.jupiter.api.Test
++    void matchesRetainedJavaImplementations() throws Exception {
++        OxideNoise.initialize();
++        if (!OxideNoise.backendName().equals("ffm") && !OxideNoise.backendName().equals("jffi")) throw new AssertionError("A native backend is required");
++        SplittableRandom random = new SplittableRandom(4053901273L);
++        for (int seedIndex = 0; seedIndex < 24; seedIndex++) {
++            long seed = seedIndex < 5 ? new long[]{0,1,-1,Long.MIN_VALUE,Long.MAX_VALUE}[seedIndex] : random.nextLong();
++            for (boolean smeared : new boolean[]{false,true}) {
++                for (int layers : new int[]{1,2,5}) {
++                    NoiseStack stack = stack(seed,layers,smeared);
++                    for (int index = 0; index < VOLUMES.length; index++) {
++                        check(stack,VOLUMES[index],index%2==0?.25:1.0181268882175227,index%2==0?.125:-.03125,
++                            index%3==0?-.75f:1.0f);
++                    }
++                }
++            }
++        }
++        for (boolean smeared : new boolean[]{false,true}) {
++            check(stack(7611,8,smeared),new DensityVolume(16,384,16,160000,-64,160000),.25,.125,1.0f);
++        }
++        sharedStateSurvivesConcurrentCalls();
++        fallbackCases();
++        System.out.println("PARITY backend="+OxideNoise.backendName()+" cases="+cases+" floatValues="+values);
++    }
++
++    private static NoiseStack stack(long seed,int count,boolean smeared) {
++        NoiseStack.Builder builder=NoiseStack.builder();
++        RandomSource random=RandomSource.create(seed);
++        double[] frequencies={1.0,.25,2.0,1.0181268882175227,0x1.0p-24};
++        float[] amplitudes={1.0f,-.25f,.5f,Float.MIN_NORMAL,Float.MIN_VALUE};
++        for(int i=0;i<count;i++)builder.add(smeared?new SmearedPerlinNoise(random,i%3==0?0.0:.125):new PerlinNoise(random),
++            frequencies[i%frequencies.length],amplitudes[i%amplitudes.length]);
++        return (NoiseStack)builder.build();
++    }
++
++    private static DensityBuffer initial(int count) {
++        DensityBuffer buffer=DensityBuffer.createUnpooled(count+7);
++        for(int i=0;i<buffer.size();i++)buffer.set(i,i%7==0?-0.0f:(i%17-8)*.0625f);
++        return buffer;
++    }
++
++    private static void javaReference(NoiseStack stack,DensityBuffer output,DensityVolume volume,double xz,double y,float amplitude) {
++        // Calls the retained, unmodified Java Perlin implementations directly.
++        for(NoiseStack.Layer layer:stack.layers)layer.noise().addToVolume(output,volume,xz*layer.frequency(),y*layer.frequency(),amplitude*layer.amplitude());
++    }
++
++    private static void equal(DensityBuffer expected,DensityBuffer actual,String label) {
++        for(int i=0;i<expected.size();i++)if(Float.floatToRawIntBits(expected.get(i))!=Float.floatToRawIntBits(actual.get(i))) {
++            throw new AssertionError(label+" index="+i+" expected="+Integer.toHexString(Float.floatToRawIntBits(expected.get(i)))
++                +" actual="+Integer.toHexString(Float.floatToRawIntBits(actual.get(i))));
++        }
++    }
++
++    private static void check(NoiseStack stack,DensityVolume volume,double xz,double y,float amplitude) {
++        DensityBuffer expected=initial(volume.size()),actual=initial(volume.size()),direct=initial(volume.size());
++        javaReference(stack,expected,volume,xz,y,amplitude);
++        OxideNoise nativeNoise=Objects.requireNonNull(OxideNoise.create(stack.layers),"Eligible state must use native code");
++        if(!nativeNoise.addToVolume(direct,volume,xz,y,amplitude))throw new AssertionError("Eligible native call fell back");
++        stack.addToVolume(actual,volume,xz,y,amplitude);
++        equal(expected,direct,"direct native "+volume);
++        equal(expected,actual,"public stack "+volume);
++        cases++;
++        values+=2L*expected.size();
++    }
++
++    private static void sharedStateSurvivesConcurrentCalls() throws Exception {
++        NoiseStack stack=stack(3301,5,false);
++        DensityVolume volume=new DensityVolume(5,49,5,-80,-64,128,4,8,4);
++        DensityBuffer expected=initial(volume.size());
++        javaReference(stack,expected,volume,.25,.125,1);
++        CountDownLatch start=new CountDownLatch(1);
++        try(var executor=Executors.newFixedThreadPool(4)) {
++            CompletableFuture<?>[] results=new CompletableFuture[4];
++            for(int i=0;i<results.length;i++)results[i]=CompletableFuture.runAsync(()->{
++                try{start.await();}catch(InterruptedException error){Thread.currentThread().interrupt();throw new RuntimeException(error);}
++                for(int repeat=0;repeat<12;repeat++){
++                    DensityBuffer actual=initial(volume.size());
++                    stack.addToVolume(actual,volume,.25,.125,1);
++                    equal(expected,actual,"concurrent call");
++                    if(repeat==3)System.gc();
++                }
++            },executor);
++            start.countDown();
++            CompletableFuture.allOf(results).get(30,java.util.concurrent.TimeUnit.SECONDS);
++        }
++    }
++
++    private static void fallbackCases() {
++        DensityVolume volume=new DensityVolume(2,3,2,-16,-64,16);
++        NoiseStack mixed=(NoiseStack)NoiseStack.builder().add(new PerlinNoise(RandomSource.create(1)),1,1)
++            .add(new SmearedPerlinNoise(RandomSource.create(2),.125),.25,.5f).build();
++        if(!mixed.getClass().equals(NoiseStack.class))throw new AssertionError("Mixed path changed");
++        DensityBuffer expected=initial(volume.size()),actual=initial(volume.size());
++        javaReference(mixed,expected,volume,1,1,1);mixed.addToVolume(actual,volume,1,1,1);
++        equal(expected,actual,"mixed layers");
++        NoiseStack subclass=(NoiseStack)NoiseStack.builder().add(new PerlinNoise(RandomSource.create(1)){
++            @Override public void addToVolume(DensityBuffer output,DensityVolume v,double xz,double y,float amplitude){
++                output.set(0,123.25f);
++            }
++        },1,1).build();
++        actual=initial(volume.size());subclass.addToVolume(actual,volume,1,1,1);
++        if(actual.get(0)!=123.25f)throw new AssertionError("Subclass behavior bypassed");
++        NoiseStack nonFinite=(NoiseStack)NoiseStack.builder().add(new PerlinNoise(RandomSource.create(1)),Double.NaN,1).build();
++        if(OxideNoise.create(nonFinite.layers)!=null)throw new AssertionError("Unsupported state must retain Java evaluation");
++        expected=initial(volume.size());actual=initial(volume.size());
++        javaReference(nonFinite,expected,volume,1,1,1);nonFinite.addToVolume(actual,volume,1,1,1);
++        equal(expected,actual,"nonfinite fallback");
++        NoiseStack empty=(NoiseStack)NoiseStack.builder().build();
++        expected=initial(volume.size());actual=initial(volume.size());empty.addToVolume(actual,volume,1,1,1);
++        equal(expected,actual,"empty stack");
++    }
++}

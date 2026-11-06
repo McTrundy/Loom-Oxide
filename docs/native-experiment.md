@@ -16,8 +16,10 @@ a requirement for every optimization.
 
 This is a separate experimental development line. Changes stay in this fork;
 upstream integration and production deployment require their own scope. The
-initial commit changes documentation only. No native library, build integration
-or runtime replacement has been implemented.
+first runtime experiment adds optional regular/smeared Perlin volume evaluation
+through the same Rust library using FFM or JFFI. Java remains the default. See
+[native setup and checks](../native/noise/README.md). The native implementation
+is a faithful reconstruction; algorithm and CPU-specific tuning are separate.
 
 ## Compatibility contract
 

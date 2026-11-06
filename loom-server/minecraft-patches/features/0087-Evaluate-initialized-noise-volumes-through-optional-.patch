@@ -1,0 +1,319 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: McTrundy <58271175+McTrundy@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 20:34:35 +0000
+Subject: [PATCH] Evaluate initialized noise volumes through optional Rust
+ bindings
+
+Co-authored-by: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+
+diff --git a/net/minecraft/server/Main.java b/net/minecraft/server/Main.java
+index aa7f2ba4d931f98ce15c52dc2b99f07504149582..89f391621803561da2be7ee8c54572678512a534 100644
+--- a/net/minecraft/server/Main.java
++++ b/net/minecraft/server/Main.java
+@@ -111,6 +111,7 @@ public class Main {
+             }
+ 
+             io.papermc.paper.plugin.PluginInitializerManager.load(options); // Paper
++            net.minecraft.world.level.levelgen.synth.OxideNoise.initialize(); // Load optional native code before tick owners start
+             Bootstrap.bootStrap();
+             Bootstrap.validate();
+             // Paper start - Perf: Init DataConverter asynchronously
+diff --git a/net/minecraft/world/level/levelgen/densityfunction/DensityBuffer.java b/net/minecraft/world/level/levelgen/densityfunction/DensityBuffer.java
+index ec0ca312c28dc1ba4b4f310ff3f80f22fc3367a5..7fedf74b871db169b73aeeac449d09b277b01f33 100644
+--- a/net/minecraft/world/level/levelgen/densityfunction/DensityBuffer.java
++++ b/net/minecraft/world/level/levelgen/densityfunction/DensityBuffer.java
+@@ -1,6 +1,7 @@
+ package net.minecraft.world.level.levelgen.densityfunction;
+ 
+ import java.util.Arrays;
++import java.lang.foreign.MemorySegment;
+ 
+ public class DensityBuffer {
+     protected final float[] values;
+@@ -43,6 +44,11 @@ public class DensityBuffer {
+         System.arraycopy(other.values, 0, this.values, 0, this.size());
+     }
+ 
++    /** Heap view valid only while the caller owns the current buffer lease. */
++    public MemorySegment asMemorySegment() {
++        return MemorySegment.ofArray(this.values).asSlice(0, (long)this.size * Float.BYTES);
++    }
++
+     public int capacity() {
+         return this.values.length;
+     }
+diff --git a/net/minecraft/world/level/levelgen/synth/NoiseStack.java b/net/minecraft/world/level/levelgen/synth/NoiseStack.java
+index 3cb7094148b00eba7c46c3ec56653c02d179c6bb..71ab4e5e84e5af0d0e72b019d2ad865886ef0402 100644
+--- a/net/minecraft/world/level/levelgen/synth/NoiseStack.java
++++ b/net/minecraft/world/level/levelgen/synth/NoiseStack.java
+@@ -3,6 +3,7 @@ package net.minecraft.world.level.levelgen.synth;
+ import com.google.common.annotations.VisibleForTesting;
+ import java.util.ArrayList;
+ import java.util.List;
++import org.jspecify.annotations.Nullable;
+ import net.minecraft.util.Interval;
+ import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
+ import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+@@ -104,8 +105,11 @@ public class NoiseStack implements Noise {
+     }
+ 
+     private static class Perlin extends NoiseStack {
++        private final @Nullable OxideNoise oxide;
++
+         private Perlin(final NoiseStack.Layer[] layers) {
+             super(layers);
++            this.oxide = OxideNoise.create(layers);
+         }
+ 
+         @Override
+@@ -122,6 +126,7 @@ public class NoiseStack implements Noise {
+ 
+         @Override
+         public void addToVolume(final DensityBuffer buffer, final DensityVolume volume, final double xzScale, final double yScale, final float amplitude) {
++            if (this.oxide != null && this.oxide.addToVolume(buffer, volume, xzScale, yScale, amplitude)) return;
+             for (NoiseStack.Layer layer : this.layers) {
+                 double frequency = layer.frequency;
+                 layer.noise.addToVolume(buffer, volume, xzScale * frequency, yScale * frequency, amplitude * layer.amplitude);
+@@ -130,8 +135,11 @@ public class NoiseStack implements Noise {
+     }
+ 
+     private static class SmearedPerlin extends NoiseStack {
++        private final @Nullable OxideNoise oxide;
++
+         private SmearedPerlin(final NoiseStack.Layer[] layers) {
+             super(layers);
++            this.oxide = OxideNoise.create(layers);
+         }
+ 
+         @Override
+@@ -148,6 +156,7 @@ public class NoiseStack implements Noise {
+ 
+         @Override
+         public void addToVolume(final DensityBuffer buffer, final DensityVolume volume, final double xzScale, final double yScale, final float amplitude) {
++            if (this.oxide != null && this.oxide.addToVolume(buffer, volume, xzScale, yScale, amplitude)) return;
+             for (NoiseStack.Layer layer : this.layers) {
+                 double frequency = layer.frequency;
+                 layer.noise.addToVolume(buffer, volume, xzScale * frequency, yScale * frequency, amplitude * layer.amplitude);
+diff --git a/net/minecraft/world/level/levelgen/synth/OxideNoise.java b/net/minecraft/world/level/levelgen/synth/OxideNoise.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a1beff9f8db34cd30aff51dde080cbb7de38215
+--- /dev/null
++++ b/net/minecraft/world/level/levelgen/synth/OxideNoise.java
+@@ -0,0 +1,202 @@
++package net.minecraft.world.level.levelgen.synth;
++
++import com.mojang.logging.LogUtils;
++import java.lang.foreign.Arena;
++import java.lang.foreign.FunctionDescriptor;
++import java.lang.foreign.Linker;
++import java.lang.foreign.MemorySegment;
++import java.lang.foreign.SymbolLookup;
++import java.lang.foreign.ValueLayout;
++import java.lang.invoke.MethodHandle;
++import java.lang.ref.Reference;
++import java.nio.file.Path;
++import net.minecraft.SharedConstants;
++import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
++import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
++import org.jspecify.annotations.Nullable;
++
++/** Opt-in synchronous evaluation of initialized, immutable noise layers. */
++public final class OxideNoise {
++    private static final long LAYER_BYTES = 304;
++    private static final long VOLUME_BYTES = 64;
++    private static final String MODE = System.getProperty("loom.oxide.noiseBackend", "java");
++    private static final @Nullable NativeCall CALL = load();
++    private final MemorySegment layers;
++    private final int layerCount;
++
++    private OxideNoise(MemorySegment layers, int layerCount) {
++        this.layers = layers;
++        this.layerCount = layerCount;
++    }
++
++    /** Called before server owners start, so library loading never blocks a tick. */
++    public static void initialize() {
++        // Class initialization validates the selected library before world setup.
++    }
++
++    public static String backendName() {
++        return MODE;
++    }
++
++    private static @Nullable NativeCall load() {
++        if (MODE.equals("java")) return null;
++        if (!MODE.equals("ffm") && !MODE.equals("jffi")) throw new IllegalArgumentException("Unknown loom.oxide.noiseBackend: " + MODE);
++        String filename = System.getProperty("loom.oxide.nativeLibrary");
++        if (filename == null || filename.isBlank()) {
++            throw new IllegalStateException("Native noise requires -Dloom.oxide.nativeLibrary=<library path>");
++        }
++        Path path = Path.of(filename).toAbsolutePath().normalize();
++        try {
++            NativeCall call = switch (MODE) {
++                case "ffm" -> new FfmCall(path);
++                case "jffi" -> new JffiCall(path);
++                default -> throw new IllegalArgumentException("Unknown loom.oxide.noiseBackend: " + MODE);
++            };
++            if (ValueLayout.ADDRESS.byteSize() != 8 || call.version() != 1
++                || call.layout() != (LAYER_BYTES << 32 | VOLUME_BYTES)) {
++                throw new IllegalStateException("Native noise ABI/layout does not match this runtime");
++            }
++            LogUtils.getLogger().info("Loom Oxide noise backend: {}", MODE);
++            return call;
++        } catch (Throwable failure) {
++            throw propagate(failure);
++        }
++    }
++
++    static @Nullable OxideNoise create(NoiseStack.Layer[] source) {
++        if (CALL == null || source.length == 0) return null;
++        for (NoiseStack.Layer layer : source) {
++            Class<?> type = layer.noise().getClass();
++            if (type != PerlinNoise.class && type != SmearedPerlinNoise.class) return null;
++            if (!Double.isFinite(layer.frequency()) || !Float.isFinite(layer.amplitude())) return null;
++            if (layer.noise() instanceof SmearedPerlinNoise smeared && !Double.isFinite(smeared.fudgeYScale())) return null;
++        }
++        Arena arena = Arena.ofAuto();
++        MemorySegment state = arena.allocate(Math.multiplyExact(LAYER_BYTES, source.length), 8);
++        for (int index = 0; index < source.length; index++) {
++            NoiseStack.Layer layer = source[index];
++            PerlinNoise noise = (PerlinNoise) layer.noise();
++            long base = index * LAYER_BYTES;
++            state.set(ValueLayout.JAVA_DOUBLE, base, noise.offsetX);
++            state.set(ValueLayout.JAVA_DOUBLE, base + 8, noise.offsetY);
++            state.set(ValueLayout.JAVA_DOUBLE, base + 16, noise.offsetZ);
++            state.set(ValueLayout.JAVA_DOUBLE, base + 24, layer.frequency());
++            state.set(ValueLayout.JAVA_DOUBLE, base + 32, noise instanceof SmearedPerlinNoise smeared ? smeared.fudgeYScale() : 0.0);
++            state.set(ValueLayout.JAVA_FLOAT, base + 40, layer.amplitude());
++            state.set(ValueLayout.JAVA_INT, base + 44, noise instanceof SmearedPerlinNoise ? 1 : 0);
++            MemorySegment.copy(MemorySegment.ofArray(noise.perms), 0, state, base + 48, 256);
++        }
++        return new OxideNoise(state, source.length);
++    }
++
++    boolean addToVolume(DensityBuffer buffer, DensityVolume volume, double xzScale, double yScale, float amplitude) {
++        NativeCall call = CALL;
++        if (call == null) return false;
++        if (!Double.isFinite(xzScale) || !Double.isFinite(yScale) || !Float.isFinite(amplitude)) return false;
++        long columns = (long) volume.sizeX() * volume.sizeZ();
++        if (columns > Integer.MAX_VALUE / volume.sizeY()) return false;
++        long count = columns * volume.sizeY();
++        if (count > buffer.size()) return false;
++        long bytes = count * Float.BYTES;
++        try (Arena scratch = Arena.ofConfined()) {
++            MemorySegment output = scratch.allocate(bytes, Float.BYTES);
++            MemorySegment original = buffer.asMemorySegment().asSlice(0, bytes);
++            output.copyFrom(original);
++            MemorySegment spec = scratch.allocate(VOLUME_BYTES, 8);
++            spec.set(ValueLayout.JAVA_INT, 0, volume.sizeX());
++            spec.set(ValueLayout.JAVA_INT, 4, volume.sizeY());
++            spec.set(ValueLayout.JAVA_INT, 8, volume.sizeZ());
++            spec.set(ValueLayout.JAVA_INT, 12, volume.minBlockX());
++            spec.set(ValueLayout.JAVA_INT, 16, volume.minBlockY());
++            spec.set(ValueLayout.JAVA_INT, 20, volume.minBlockZ());
++            spec.set(ValueLayout.JAVA_INT, 24, volume.stepBlockX());
++            spec.set(ValueLayout.JAVA_INT, 28, volume.stepBlockY());
++            spec.set(ValueLayout.JAVA_INT, 32, volume.stepBlockZ());
++            spec.set(ValueLayout.JAVA_INT, 36, SharedConstants.DEBUG_ENABLE_FARLANDS ? 0 : 1);
++            spec.set(ValueLayout.JAVA_DOUBLE, 40, xzScale);
++            spec.set(ValueLayout.JAVA_DOUBLE, 48, yScale);
++            spec.set(ValueLayout.JAVA_FLOAT, 56, amplitude);
++            spec.set(ValueLayout.JAVA_INT, 60, 0);
++            int status;
++            try {
++                status = call.volume(this.layers, this.layerCount, spec, output, count);
++            } catch (Throwable failure) {
++                throw propagate(failure);
++            } finally {
++                // JFFI receives raw addresses; keep their automatic arena alive.
++                Reference.reachabilityFence(this.layers);
++            }
++            if (status != 0) throw new IllegalStateException("Native noise evaluation failed: status " + status);
++            // Never expose a partially computed native result to the Java caller.
++            original.copyFrom(output);
++        }
++        return true;
++    }
++
++    private static RuntimeException propagate(Throwable failure) {
++        if (failure instanceof Error error) throw error;
++        if (failure instanceof RuntimeException error) return error;
++        return new IllegalStateException("Native noise call failed", failure);
++    }
++
++    private interface NativeCall {
++        int version() throws Throwable;
++        long layout() throws Throwable;
++        int volume(MemorySegment layers, long layerCount, MemorySegment volume, MemorySegment output, long outputCount) throws Throwable;
++    }
++
++    private static final class FfmCall implements NativeCall {
++        private final Arena libraryArena = Arena.ofAuto();
++        private final MethodHandle version, layout, volume;
++
++        FfmCall(Path path) {
++            SymbolLookup library = SymbolLookup.libraryLookup(path, this.libraryArena);
++            Linker linker = Linker.nativeLinker();
++            this.version = linker.downcallHandle(library.find("oxide_noise_abi_version").orElseThrow(), FunctionDescriptor.of(ValueLayout.JAVA_INT));
++            this.layout = linker.downcallHandle(library.find("oxide_noise_layout").orElseThrow(), FunctionDescriptor.of(ValueLayout.JAVA_LONG));
++            this.volume = linker.downcallHandle(library.find("oxide_noise_volume_v1").orElseThrow(), FunctionDescriptor.of(ValueLayout.JAVA_INT,
++                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
++        }
++
++        @Override public int version() throws Throwable { return (int) this.version.invokeExact(); }
++        @Override public long layout() throws Throwable { return (long) this.layout.invokeExact(); }
++        @Override public int volume(MemorySegment layers, long layerCount, MemorySegment spec, MemorySegment output, long outputCount) throws Throwable {
++            return (int) this.volume.invokeExact(layers, layerCount, spec, output, outputCount);
++        }
++    }
++
++    private static final class JffiCall implements NativeCall {
++        private final com.kenai.jffi.Library library;
++        private final com.kenai.jffi.Invoker invoker = com.kenai.jffi.Invoker.getInstance();
++        private final com.kenai.jffi.CallContext versionContext, layoutContext, volumeContext;
++        private final long version, layout, volume;
++
++        JffiCall(Path path) {
++            this.library = com.kenai.jffi.Library.getCachedInstance(path.toString(), com.kenai.jffi.Library.NOW | com.kenai.jffi.Library.LOCAL);
++            if (this.library == null) throw new IllegalStateException("Cannot load native noise: " + com.kenai.jffi.Library.getLastError());
++            this.version = symbol("oxide_noise_abi_version");
++            this.layout = symbol("oxide_noise_layout");
++            this.volume = symbol("oxide_noise_volume_v1");
++            this.versionContext = context(com.kenai.jffi.Type.UINT32);
++            this.layoutContext = context(com.kenai.jffi.Type.UINT64);
++            this.volumeContext = context(com.kenai.jffi.Type.SINT32, com.kenai.jffi.Type.POINTER, com.kenai.jffi.Type.UINT64,
++                com.kenai.jffi.Type.POINTER, com.kenai.jffi.Type.POINTER, com.kenai.jffi.Type.UINT64);
++        }
++
++        private long symbol(String name) {
++            long address = this.library.getSymbolAddress(name);
++            if (address == 0) throw new IllegalStateException("Missing native noise symbol: " + name);
++            return address;
++        }
++
++        private static com.kenai.jffi.CallContext context(com.kenai.jffi.Type result, com.kenai.jffi.Type... arguments) {
++            return com.kenai.jffi.CallContext.getCallContext(result, arguments, com.kenai.jffi.CallingConvention.DEFAULT, false);
++        }
++
++        @Override public int version() { return (int) this.invoker.invokeN0(this.versionContext, this.version); }
++        @Override public long layout() { return this.invoker.invokeN0(this.layoutContext, this.layout); }
++        @Override public int volume(MemorySegment layers, long layerCount, MemorySegment spec, MemorySegment output, long outputCount) {
++            return (int) this.invoker.invokeN5(this.volumeContext, this.volume, layers.address(), layerCount, spec.address(), output.address(), outputCount);
++        }
++    }
++}
+diff --git a/net/minecraft/world/level/levelgen/synth/SmearedPerlinNoise.java b/net/minecraft/world/level/levelgen/synth/SmearedPerlinNoise.java
+index 4884b35596ea7ab327f75f0537affab97df492be..f25799c17ac2b0c288f0eaed72abe930f841dbd6 100644
+--- a/net/minecraft/world/level/levelgen/synth/SmearedPerlinNoise.java
++++ b/net/minecraft/world/level/levelgen/synth/SmearedPerlinNoise.java
+@@ -20,6 +20,10 @@ public class SmearedPerlinNoise extends PerlinNoise {
+         return Interval.ofSymmetric((float)(Math.abs(fudgeYScale) + 2.0));
+     }
+ 
++    double fudgeYScale() {
++        return this.fudgeYScale;
++    }
++
+     @Override
+     public Interval range() {
+         return range(this.fudgeYScale);

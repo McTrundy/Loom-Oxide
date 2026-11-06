@@ -34,6 +34,15 @@ jobs:
           BUILD_NUMBER: ${{ steps.metadata.outputs.build_number }}
           BUILD_STARTED_AT: ${{ steps.metadata.outputs.build_started_at }}
         run: ./scripts/verify-ci.sh
+      - name: Build and Check Native Noise
+        shell: bash
+        run: |
+          docker build -t loom-oxide-rust native/noise
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=/workspace" \
+            --workdir /workspace/native/noise -e CARGO_HOME=/tmp/oxide-cargo \
+            loom-oxide-rust sh -c 'cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked && cargo build --release --locked'
+          ./scripts/verify-native-noise.sh
       - name: Package Build
         id: package
         shell: bash

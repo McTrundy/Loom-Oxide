@@ -272,16 +272,21 @@
  configurations.named(log4jPlugins.compileClasspathConfigurationName) {
      extendsFrom(configurations.compileClasspath.get())
  }
-@@ -111,7 +_,7 @@
+@@ -109,7 +_,9 @@
  }
  
  dependencies {
 -    implementation(project(":paper-api"))
 +    implementation(project(":loom-api"))
++    implementation("com.github.jnr:jffi:1.4.7")
++    runtimeOnly("com.github.jnr:jffi:1.4.7:native")
      implementation(platform("ca.spottedleaf.leafpile:bom:1.2.4"))
      implementation("ca.spottedleaf.leafpile:common")
      implementation("ca.spottedleaf.leafpile:concurrentutil")
-@@ -171,14 +_,20 @@
+@@ -171,17 +_,23 @@
+         val gitHash = git.exec(providers, "rev-parse", "--short=7", "HEAD").get().trim()
+         val implementationVersion = "$mcVersion-${build ?: "DEV"}-$gitHash"
+         val date = git.exec(providers, "show", "-s", "--format=%ci", gitHash).get().trim()
 -        val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim()
 +        val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim().let {
 +            if (it == "HEAD") "ver/${mcVersion.split('.').take(2).joinToString(".")}.x" else it
@@ -308,7 +313,7 @@
              "Build-Number" to (build ?: ""),
              "Build-Time" to buildTime.toString(),
              "Git-Branch" to gitBranch,
-@@ -206,16 +_,40 @@
+@@ -209,16 +_,44 @@
  
  // Bump compile tasks to 1GB memory to avoid OOMs
  tasks.withType<JavaCompile>().configureEach {
@@ -354,7 +359,7 @@
  }
  
  // Use TCA for console improvements
-@@ -326,7 +_,7 @@
+@@ -331,7 +_,7 @@
  }
  
  fill {

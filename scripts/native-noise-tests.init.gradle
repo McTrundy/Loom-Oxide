@@ -1,0 +1,15 @@
+def oxideBackend = System.getProperty('oxide.test.backend')
+def oxideLibrary = System.getProperty('oxide.test.library')
+if (!(oxideBackend in ['ffm', 'jffi']) || !oxideLibrary) {
+    throw new GradleException('Set oxide.test.backend=ffm|jffi and oxide.test.library to the built library')
+}
+
+gradle.projectsEvaluated {
+    gradle.rootProject.project(':loom-server').tasks.named('test', Test) {
+        setIncludes(['net/minecraft/world/level/levelgen/synth/OxideNoiseTestSuite.class'])
+        systemProperty 'loom.oxide.noiseBackend', oxideBackend
+        systemProperty 'loom.oxide.nativeLibrary', oxideLibrary
+        inputs.file(oxideLibrary).withPropertyName('oxideNativeLibrary').withPathSensitivity(PathSensitivity.NONE)
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+    }
+}
