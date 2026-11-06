@@ -1,6 +1,6 @@
-# Ferrum
+# Loom Oxide
 
-Ferrum is an experimental fork of [Loom](https://github.com/AnxeloK/Loom)
+Loom Oxide is an experimental fork of [Loom](https://github.com/AnxeloK/Loom)
 for studying expensive Minecraft computations and evaluating compatible native
 implementations, including Rust. Compatibility is a requirement; performance
 improvements must be measured. No native implementation is included yet.

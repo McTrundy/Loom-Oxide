@@ -1,6 +1,6 @@
 # Native computation experiment
 
-Ferrum investigates the cost of Minecraft's processing paths and replaces
+Loom Oxide investigates the cost of Minecraft's processing paths and replaces
 individual computations only when their behavior is understood and a measured
 benefit survives integration. Rust is a candidate implementation language, not
 a requirement for every optimization.
